@@ -2,64 +2,132 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { h, diff, layoutCanvas, resetNodeIdCounter } from './core/vdom.js';
+import { encodeColorQL } from './codec/colorql-codec.js';
 
-// Resolve __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
-const WANDER_PORT = 4000;          // the Wander server you already run
+const PORT = process.env.PORT || 3000;
 
-// Serve static bundle and index.html
+// Serve public assets and source files for direct ES module loading
 app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use('/src', express.static(path.join(__dirname, '..', 'src')));
 
-// ------------------------------------------------------------------
-// WebSocket – one per browser client.  It receives events from the
-// browser and forwards them to the Preact instance.
+/**
+ * Stateful UI Component Definition
+ */
+function renderApp(state) {
+  return h('div', { key: 'app_root', 'data-card': 'true' },
+    h('h1', { key: 'app_title' }, 'web2wasm Enterprise UI'),
+    h('p', { key: 'app_meta' }, `Security Sandbox: [ACTIVE] | Mode: [${state.mode.toUpperCase()}]`),
+    h('h2', { key: 'app_count', style: { color: '#58a6ff' } }, `Counter Value: ${state.count}`),
+    h('button', {
+      key: 'btn_inc',
+      'data-action': 'increment',
+      style: { backgroundColor: '#238636', color: '#ffffff' }
+    }, '⚡ Increment Counter'),
+    h('button', {
+      key: 'btn_rst',
+      'data-action': 'reset',
+      style: { backgroundColor: '#da3633', color: '#ffffff' }
+    }, '↺ Reset Counter'),
+    h('p', {
+      key: 'app_log',
+      style: { color: '#8b949e', fontSize: '13px' }
+    }, `Last Event: ${state.lastAction} (at ${state.lastTime})`)
+  );
+}
+
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (ws) => {
-  console.log('[WS] Browser connected');
+  console.log('[WS] Client connected');
 
-  ws.on('message', async (msg) => {
-    // Expect a JSON payload {type, ...}
-    const evt = JSON.parse(msg);
+  const session = {
+    mode: 'dom',
+    count: 0,
+    lastAction: 'Session Initiated',
+    lastTime: new Date().toLocaleTimeString(),
+    oldTree: null
+  };
 
-    // 1. Re‑hydrate the Preact component tree.
-    // For simplicity we just log here – replace with your own render logic.
-    console.log('[WS] Event from client:', evt);
+  function sendFullSync() {
+    resetNodeIdCounter();
+    const tree = renderApp(session);
+    session.oldTree = tree;
 
-    // 2. Send an updated HTML string to Wander
-    // (here you would call a function that serialises your Preact app).
-    const html = await renderPreactToString(evt);   // stub
+    if (session.mode === 'dom') {
+      const patches = diff(null, tree);
+      const packet = encodeColorQL(patches, 'dom');
+      ws.send(JSON.stringify(packet));
+    } else {
+      const commands = layoutCanvas(tree, 640, 400);
+      const packet = encodeColorQL(commands, 'canvas');
+      ws.send(JSON.stringify(packet));
+    }
+  }
 
-    // 3. Forward the new markup to Wander via its HTTP API.
-    // Wander expects POST /render with {markup: "<html…>"}
-    await fetch(`http://localhost:${WANDER_PORT}/render`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markup: html })
-    });
+  function handleAction(action) {
+    if (action === 'increment') {
+      session.count++;
+      session.lastAction = 'increment (+1)';
+    } else if (action === 'reset') {
+      session.count = 0;
+      session.lastAction = 'reset (0)';
+    } else {
+      session.lastAction = action || 'unknown';
+    }
+    session.lastTime = new Date().toLocaleTimeString();
+
+    resetNodeIdCounter();
+    const newTree = renderApp(session);
+
+    if (session.mode === 'dom') {
+      const patches = diff(session.oldTree, newTree);
+      session.oldTree = newTree;
+      if (patches.length > 0) {
+        const packet = encodeColorQL(patches, 'dom');
+        ws.send(JSON.stringify(packet));
+      }
+    } else {
+      session.oldTree = newTree;
+      const commands = layoutCanvas(newTree, 640, 400);
+      const packet = encodeColorQL(commands, 'canvas');
+      ws.send(JSON.stringify(packet));
+    }
+  }
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'init_session') {
+        session.mode = msg.mode || 'dom';
+        sendFullSync();
+      } else if (msg.type === 'switch_mode') {
+        session.mode = msg.mode;
+        sendFullSync();
+      } else if (msg.type === 'client_event') {
+        const action = msg.event?.action || msg.event?.id;
+        handleAction(action);
+      }
+    } catch (err) {
+      console.error('[WS] Error handling message:', err);
+    }
   });
 
-  ws.on('close', () => console.log('[WS] Browser disconnected'));
+  ws.on('close', () => {
+    console.log('[WS] Client disconnected');
+  });
 });
 
-// Upgrade HTTP to WS
-app.server = app.listen(PORT, () => {
-  console.log(`⚡️ Server listening on http://localhost:${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`🚀 web2wasm server running on http://localhost:${PORT}`);
 });
-app.server.on('upgrade', (request, socket, head) => {
+
+server.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
     wss.emit('connection', ws, request);
   });
 });
-
-// ------------------------------------------------------------------
-// Dummy renderer – replace with your own logic.
-async function renderPreactToString(evt) {
-  // e.g. import { h } from './preact'; const app = <MyApp />;
-  // return await preactRenderToString(app);   // you may need to bundle this
-  return `<div>Hello, event type: ${evt.type}</div>`;
-}

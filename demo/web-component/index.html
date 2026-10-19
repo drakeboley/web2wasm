@@ -1,0 +1,28 @@
+// demo/web-component/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FeatherState Web Component Demo</title>
+  <script type="module">
+    import { FeatherStateInstance } from '../src';
+    class Counter extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        const btn = document.createElement('button');
+        btn.textContent = 'Increment';
+        btn.addEventListener('click', () => {
+          const current = FeatherStateInstance.get('count') || 0;
+          FeatherStateInstance.set('count', current + 1);
+        });
+        this.shadowRoot.append(btn);
+      }
+    }
+    customElements.define('feather-counter', Counter);
+  </script>
+</head>
+<body>
+  <feather-counter></feather-counter>
+</body>
+</html>
